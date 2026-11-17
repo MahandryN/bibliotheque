@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bibliothèque</title>
+<style>
+:root{--ink:#14302f;--bg:#eef2f1;--card:#fff;--line:#cfd9d7;--main:#0f5a55;--warn:#b4531a;--ok:#1d7a46;--err:#b3261e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:480px;margin:0 auto;padding:16px}
+h1{font-size:1.25rem;margin:4px 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+label{display:block;font-weight:600;margin:10px 0 4px}
+input{width:100%;padding:12px;border:1px solid var(--line);border-radius:8px;font:inherit}
+button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:12px 16px;background:var(--main);color:#fff;cursor:pointer}
+button.alt{background:#fff;color:var(--ink);border:1px solid var(--line)}
+button:disabled{opacity:.4}
+button:focus-visible,input:focus-visible{outline:3px solid #e0a43e;outline-offset:2px}
+.modes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
+.modes button{background:#fff;color:var(--ink);border:2px solid var(--line)}
+.modes button.on{border-color:var(--main);background:var(--main);color:#fff}
+#reader{width:100%;border-radius:10px;overflow:hidden;background:#000;min-height:120px}
+.slot{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.slot:last-of-type{border-bottom:0}
+.slot span:first-child{color:#58706d}
+.slot b{text-align:right}
+.todo{color:var(--warn);font-weight:600}
+#msg{padding:12px;border-radius:8px;margin-bottom:12px;font-weight:600}
+#msg.ok{background:#e1f3e8;color:var(--ok)}
+#msg.err{background:#fbe5e3;color:var(--err)}
+#msg.info{background:#fff3df;color:var(--warn)}
+.row{display:flex;gap:8px;margin-top:10px}
+.row>*{flex:1}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Bibliothèque</h1>
+
+<section id="login" class="card hidden">
+  <label for="gest">Ton prénom</label>
+  <input id="gest" autocomplete="given-name">
+  <label for="code">Code d’accès</label>
+  <input id="code" type="password" autocomplete="current-password">
+  <div class="row"><button id="go">Se connecter</button></div>
+</section>
+
+<section id="app" class="hidden">
+  <div class="modes" role="group" aria-label="Mode">
+    <button id="m-pret" class="on">Prêt</button>
+    <button id="m-retour">Retour</button>
+    <button id="m-ajout">Ajouter</button>
+  </div>
+  <div id="msg" class="hidden" role="status"></div>
+  <div id="reader"></div>
+  <div class="card" style="margin-top:12px">
+    <div id="slots"></div>
+    <div id="addform" class="hidden"><label for="a-titre">Titre</label><input id="a-titre"><label for="a-auteur">Auteur</label><input id="a-auteur"><label for="a-cat">Catégorie</label><input id="a-cat"></div>
+    <div class="row">
+      <button id="confirm" disabled>Confirmer le prêt</button>
+      <button id="reset" class="alt">Annuler</button>
+    </div>
+  </div>
+  <div class="card">
+    <label for="manual">Saisie manuelle (matricule ou ID livre)</label>
+    <div class="row"><input id="manual" autocapitalize="characters"><button id="manual-go" class="alt" style="flex:0 0 auto">Valider</button></div>
+  </div>
+  <button id="logout" class="alt" style="width:100%">Changer de gestionnaire</button>
+</section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+// 1. Colle ici l'URL de déploiement de l'application web Apps Script
+const API_URL = 'https://script.google.com/macros/s/AKfycbwGQBtBb2hQwmR6B-hQLNovCvxTuC5O1W6qYlISLmagr0TTpqHmM_eBqcKr5T76nT7Q/exec';
+
+const $ = s => document.querySelector(s);
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} },
+  del: k => { try { localStorage.removeItem(k); } catch (e) {} }
+};
+const S = { mode: 'pret', student: null, book: null, busy: false, last: '', lastT: 0 };
+let scanner = null;
+
+async function api(action, data) {
+  const r = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action, code: store.get('code'), gest: store.get('gest') }, data || {}))
+  });
+  return r.json();
+}
+
+function msg(text, type) {
+  const m = $('#msg');
+  m.textContent = text;
+  m.className = type;
+}
+function clearMsg() { $('#msg').className = 'hidden'; }
+
+function render() {
+  const slots = $('#slots');
+  const todo = t => '<b class="todo">' + t + '</b>';
+  const c = $('#confirm');
+  $('#addform').classList.toggle('hidden', S.mode !== 'ajout');
+  if (S.mode === 'ajout') {
+    const sh = S.newId ? (S.newId.length > 28 ? '…' + S.newId.slice(-26) : S.newId) : '';
+    slots.innerHTML = '<div class="slot"><span>QR</span>' + (S.newId ? '<b>' + esc(sh) + '</b>' : todo('Scanner le livre')) + '</div>';
+    c.textContent = 'Enregistrer le livre';
+    c.classList.remove('hidden');
+    c.disabled = !S.newId;
+    return;
+  }
+  c.textContent = 'Confirmer le prêt';
+  if (S.mode === 'pret') {
+    slots.innerHTML =
+      '<div class="slot"><span>Élève</span>' + (S.student ? '<b>' + esc(S.student.nom) + '<br>' + esc(S.student.classe) + '</b>' : todo('Scanner la carte')) + '</div>' +
+      '<div class="slot"><span>Livre</span>' + (S.book ? '<b>' + esc(S.book.titre) + '</b>' : todo('Scanner le livre')) + '</div>';
+    $('#confirm').classList.remove('hidden');
+    $('#confirm').disabled = !(S.student && S.book);
+  } else {
+    slots.innerHTML = '<div class="slot"><span>Retour</span>' + todo('Scanner le livre') + '</div>';
+    $('#confirm').classList.add('hidden');
+  }
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function setMode(m) {
+  S.mode = m; S.student = null; S.book = null; S.newId = null; clearMsg();
+  $('#m-ajout').classList.toggle('on', m === 'ajout');
+  $('#m-pret').classList.toggle('on', m === 'pret');
+  $('#m-retour').classList.toggle('on', m === 'retour');
+  render();
+}
+
+async function onScan(text) {
+  const t = String(text).trim();
+  const now = Date.now();
+  if (!t || S.busy || (t === S.last && now - S.lastT < 2500)) return;
+  S.last = t; S.lastT = now; S.busy = true;
+  try {
+    if (S.mode === 'retour') {
+      const r = await api('return', { id: t });
+      if (r.ok) msg('Retour enregistré : ' + r.titre + ' (' + r.nom + ')' + (r.retard ? ' — rendu en retard' : ''), r.retard ? 'info' : 'ok');
+      else msg(r.error, 'err');
+    } else if (S.mode === 'ajout') {
+      const r = await api('scan', { id: t });
+      if (r.ok && r.type === 'book') { S.newId = null; msg('Ce livre est déjà enregistré : ' + r.book.titre, 'info'); }
+      else if (r.ok) { S.newId = null; msg('Ce code est une carte élève.', 'err'); }
+      else if (r.unknown) { S.newId = t; clearMsg(); $('#a-titre').focus(); }
+      else msg(r.error, 'err');
+    } else {
+      const r = await api('scan', { id: t });
+      if (!r.ok) msg(r.error, 'err');
+      else if (r.type === 'book') {
+        if (r.book.statut !== 'Dispo') { S.book = null; msg('Ce livre est déjà emprunté.', 'err'); }
+        else { S.book = r.book; clearMsg(); }
+      } else { S.student = r.student; clearMsg(); }
+    }
+  } catch (e) {
+    msg('Pas de connexion. Réessaie quand le réseau revient.', 'err');
+  }
+  S.busy = false;
+  render();
+}
+
+async function saveBook() {
+  const titre = $('#a-titre').value.trim();
+  if (!titre) { msg('Indique le titre du livre.', 'err'); return; }
+  if (!S.newId || S.busy) return;
+  S.busy = true;
+  try {
+    const r = await api('addBook', { id: S.newId, titre, auteur: $('#a-auteur').value.trim(), cat: $('#a-cat').value.trim() });
+    if (r.ok) { msg('Livre ajouté : ' + titre, 'ok'); S.newId = null; $('#a-titre').value = ''; $('#a-auteur').value = ''; }
+    else msg(r.error, 'err');
+  } catch (e) { msg('Pas de connexion. Le livre n’a pas été ajouté.', 'err'); }
+  S.busy = false;
+  render();
+}
+
+async function confirmLoan() {
+  if (S.mode === 'ajout') return saveBook();
+  if (!(S.student && S.book) || S.busy) return;
+  S.busy = true; $('#confirm').disabled = true;
+  try {
+    const r = await api('lend', { id: S.book.id, matricule: S.student.matricule });
+    if (r.ok) { msg('Prêt enregistré. À rendre avant le ' + r.butoire + '.', 'ok'); S.student = null; S.book = null; }
+    else msg(r.error, 'err');
+  } catch (e) { msg('Pas de connexion. Le prêt n’a pas été enregistré.', 'err'); }
+  S.busy = false;
+  render();
+}
+
+async function startScanner() {
+  if (scanner || !window.Html5Qrcode) return;
+  scanner = new Html5Qrcode('reader');
+  try {
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: 230 }, onScan, () => {});
+  } catch (e) {
+    scanner = null;
+    msg('Caméra inaccessible. Autorise la caméra ou utilise la saisie manuelle.', 'err');
+  }
+}
+
+async function showApp() {
+  $('#login').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  render();
+  startScanner();
+}
+
+async function login() {
+  store.set('gest', $('#gest').value.trim());
+  store.set('code', $('#code').value);
+  try {
+    const r = await api('ping');
+    if (r.ok) showApp(); else { store.del('code'); alert(r.error); }
+  } catch (e) { alert('Connexion impossible au script. Vérifie API_URL et ta connexion.'); }
+}
+
+$('#go').onclick = login;
+$('#m-pret').onclick = () => setMode('pret');
+$('#m-retour').onclick = () => setMode('retour');
+$('#m-ajout').onclick = () => setMode('ajout');
+$('#confirm').onclick = confirmLoan;
+$('#reset').onclick = () => { S.student = null; S.book = null; S.newId = null; clearMsg(); render(); };
+$('#manual-go').onclick = () => { onScan($('#manual').value); $('#manual').value = ''; };
+$('#logout').onclick = () => { store.del('code'); location.reload(); };
+
+if (store.get('code')) showApp(); else $('#login').classList.remove('hidden');
+</script>
+</body>
+</html>
